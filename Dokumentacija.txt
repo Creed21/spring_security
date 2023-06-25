@@ -1,0 +1,831 @@
+Cilj rada je da se pokaže integracija Spring Security biblioteke sa Spring okruženjem za razvoj.
+
+Spring Security pruža različite mogućnosti za auntetifikaciju i autorizaciju korisnika. Autentifikacija je proces u kome se utvrđuje da li korisnik može da pristupi sistemu. Ako je autentifikacija uspeđno izvršena, takav korisnik se naziva Princial (trenutno ulogovani korisnik u datom kontekstu). Autorizacija je proces u kome utvrđuje da li prijavljeni korisnik ima prava da izvrši datu operaciju.
+
+U radu su prikazana tri načina za autorizaciju (ukratko):
+	1. In Memory Authentication: Korisnik čiji se podaci čuvaju u okviru radne memorije Spring Security-ja
+	2. User Details Service: implementacija User Details Service Interfjes-a (ovo je zapravo interfejs koji pruža Spring Security), komunicira sa PostgreSQL bazom podataka u kojoj se čuvaju podaci o korisnicima, njihovim rolama i pravima pristupa
+	3. LDAP Authentication:  reimplementacija DefaultLdapAuthoritiesPopulator klase, da bi se izvukle role i prava pristupa sa LDAP servera
+
+Osnovna arhitektura aplikacije je Controller - Service - Repository, klijent putem interneta zahteva od aplikacije da  se izvrši neka akcija, kao što je na primer čuvanje nekog podatka. U ovakvom internet okruženju, postoje situacije kada ne želimo da svako može "tek tako" da pristupi sistemu, već želimo da samo udređeni korisnici to mogu. Pored toga javlja se potreba da kada neko ima pristup sistemu, da se razgraniči koje operacije može da izvršava u zavisnosti od toga kakva prava pristupa ima. Na primer ulogovani korisnik koji koristi aplikaciju kao klijent sistema, neće moći da vidi sve stvari koje vidi moderator na sistemu. Ili na primer student kada se privaji na sajt fakulteta kako bi proverio ocene, neće videti sve stavke kao što vidi profesor i neće moći da doda novi termin za polaganje ispita kao što to profesor može.
+
+(slika osnovna arhitektura sistema)
+
+Ovo se u Spring okruženju postiže dodavanjem spring security biblioteke. Dodavanjem ove biblioteke automatski se pre poziva bilo koje putanje iz kontrolera proverava da li je korisnik prijavljen u sistemu, i zahtev prvo prolazi kroz niz filtera pre nego što se pristupi samom pozivu kontrolera. Ako zahtev uspešno prođe filtere, podaci o prijavljenom korisniku se čuvaju u okviru Security Context Holder-a, a nakon toga se poziva kontroler i nastavlja se izvršenje zahtevane operacije.
+
+(slika spring security filter chain)
+
+Samim dodavanjem biblioteke, automatski ćemo "ograditi" našu aplikaciju bezbednosnim filterima, bez ikakvih podešavanja.
+
+		<dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
+
+Postavlja se pitanje kako da se prijavimo na sistem ako nigde nismo podesili korisničke podatke? - Spring security će sam napraviti korisnika umesto nas. Automatska podešavanja su takva da će korisničko ime biti user, a šifra će biti generisana (i različita) pri svakom pokretanju aplikacije. Ako želimo neko drugo korisničko ime i određenu šifru, potrebno je da u resources/application.properties fajlu dodamo sledeća podešavanja:
+		spring.security.user.name=aca
+		spring.security.user.password=aca
+
+Takođe prilikom pristupa aplikaciji ako korinik nije prijavljen u sistemu, neće moći da pristupi sistemu dok se ne prijavi. Nakon prijave kreiraće se sesija za prijavljenog korisnika (user principal) i id sesije će se biti poslat klijentu, da prilikom narednog poziva klijent ne mora ponovo da se prijavljuje na sistem već se proverava u sesijama da li postoji takav id i da li je sesija i dalje aktivna, ako to jeste slučaj klijent ne mora ponovo da se prijavi. 
+
+Zavisnosti koje se koriste u radu su sledeće:
+
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>fon.master</groupId>
+    <artifactId>NSTSecurity2</artifactId>
+    <version>1.0-SNAPSHOT</version>
+
+    <properties>
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
+    </properties>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>2.5.6</version>
+        <relativePath/>
+    </parent>
+
+    <dependencies>
+<!--        Spring dependencies -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-test</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa</artifactId>
+        </dependency>
+
+        <!-- DataBases -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>jakarta.servlet</groupId>
+            <artifactId>jakarta.servlet-api</artifactId>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>jakarta.xml.bind</groupId>
+            <artifactId>jakarta.xml.bind-api</artifactId>
+        </dependency>
+
+        <!--        LDAP dependencies -->
+        <dependency>
+            <groupId>org.springframework.ldap</groupId>
+            <artifactId>spring-ldap-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.directory.api</groupId>
+            <artifactId>api-ldap-client-api</artifactId>
+            <version>1.0.2</version>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-ldap</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>junit</groupId>
+            <artifactId>junit</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+</project>
+
+
+Da bismo mogli da kontrolišemo koji će korisnici biti u sustemu i da bismo mogli da ih imamo više od jednog, moraćemo da dodamo određene konfiguracije.
+
+
+1. In Memory Authentication
+
+Počećemo od najednostavnije kofinguracije. Da bismo to uradili moramo napraviti jednu klasu u kojoj ćemo čuvati podešavanja za Web Security (internet bezbednost).
+Klasu možemo krstiti WebConfig (opciono ime), a ona mora naslediti WebSecurityConfigurerAdapter kako bismo mogli da podesimo način autentifikacije. Reimplementiraćemo cinfigure(AuthenticationManagerBuilder auth) metodu:
+
+
+@Configuration
+@EnableWebSecurity
+public class WebConfig extends WebSecurityConfigurerAdapter {
+
+	private final PasswordEncoder passwordEncoder;
+
+	@Autowired
+    public WebConfig() {
+    	passwordEncoder = new BCryptPasswordEncoder();
+    }
+
+	@Override
+    protected void configure(AuthenticationManagerBuilder auth) throws Exception {
+        configureInMemoryAuth(auth);
+    }
+
+    private void configureInMemoryAuth(AuthenticationManagerBuilder auth) throws Exception {
+        auth.inMemoryAuthentication().passwordEncoder(passwordEncoder)
+                .withUser("user_inmemory")
+                    .password(passwordEncoder.encode("1"))
+                    .roles("USER", "STUFF") // ovo ce biti pregazno nakon poziva naredne metode
+                    .authorities("ROLE_USER", "ROLE_STUFF", "READ")
+                .and()
+                .withUser("admin_inmemory")
+                    .password(passwordEncoder.encode("1"))
+                    .authorities("ROLE_ADMIN", "ROLE_USER", "ROLE_STUFF", "READ", "WRITE", "DELETE", "UPDATE")
+                ;
+    }
+
+}
+
+Na ovaj način smo omogućili prijavu u sistem pomoću dva korsnika: user_inmemory i admin_inmemory. 
+Dve metode za dodelu prava pristupa: roles i authorities. Međutim ne možemo istovremeno imati obe metode (neće doći do greške prilikom kompajliranja ili izvršenja programa), jer ako želimo da istovremeno korisnik user_inmemory ima rolu ROLE_USER i pravo da čita podatke READ, to nećemo postići tako što ćemo dodati obe metode prilikom kreiranja korisnika. 
+
+Debug-ovanjem koda zaključeno je da poziv medote roles popunjava dodeljenje privilegije korisnika tako što doda "ROLE_" ispred naziva role. Pa će prilikom poziva metode korisnik imati role ROLE_USER i ROLE_STUFF.
+				.withUser("user_inmemory")
+                    .password(passwordEncoder.encode("1"))
+                    .roles("USER", "STUFF")
+
+Klasa PasswordEncoderConfig se koristi da se u njoj smesti passwordEncoder Bean, kako bismo koristili samo jedan passwordEncoder u aplikaciji. PasswordEncoder služi da korisničku šifru pretvori u ljudski nečitljiv niz karaktera, odnosno da je hash-uje. Ovakav hash se koristi da se uporedi sa šiframa koje se čuvaju u bazi podataka, kako ne bi mogli programeri ili administratori baze podataka da vide korisničke šifre i uloguju se kao ti korisnici.
+Hash-ovanje je jednosmerni proces, gde se pomoću određenih matematičkih algoritama od izvornog teksta dobije nečitljiv niz karaktera. Obrnuto se ne može uraditi.
+
+@Configuration
+public class PasswordEncoderConfig {
+
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }
+
+}
+
+
+Prilikom poziva metode, nećemo više videti role korisnika, jer će ih metoda authorities "pregaziti".
+					.authorities("READ")
+
+Tako da ako bismo želeli da imamo vidljive i role i privilegije u sistemu, to možemo uraditi tako što ćemo ih dodati pomoću metode authorities, kao što je pokazano u primeru: 
+	.authorities("ROLE_ADMIN", "ROLE_USER", "ROLE_STUFF", "READ", "WRITE", "DELETE", "UPDATE")
+
+Ovo će nam omogućiti da vidimo obe stvari odjednom jer se na kraju i role i privilegije upisuju u promenljivu Set<GrantedAuthority> authorities.
+
+Nakon dodavanja ovog podešavanja iako prilikom pokretanja aplikacije i pristupanja adresi http://localhost:8080/ bićemo preusmereni na login stranicu (dolazi automatski sa Spring Security bibliotekom) moći ćemo da se prijavimo u sistem ili kao user_inmemory ili kao admin_inmemory.
+
+Nakon ovog podešavanja trenutna arhitektura sistema izgleda ovako:
+
+(slika in memory auth)
+
+
+
+2. User Details Service
+
+Implementacijom UserDetailsService interfejsa želimo da korisničke podatke skladištimo i učitavamo iz relacione baze podataka. Ovaj interfejs zahteva od nas da implementiramo metodu loadUserByUsername(String username). To ćemo uraditi tako što ćemo pozvati JPARepository da učita korisnika iz baze. Korsnički podaci u bazi imaju sledeću strukturu:
+
+(slika korisnik u bazi)
+
+Ovo znači da korisnik može imati više rola, a da role mogu imati više privilegija.
+Primer:
+		korisnik 	role 	privilegije
+		admin_pg 	ADMIN 		READ
+					USER 		WRITE
+					STUFF 		DELETE
+								UPDATE
+
+Naš servis UserDetailsService -> CustomUserDetailsService će koristiti UserRepository da pronađe korisnika, a potom će vratiti implementaciju UserDetails, u primeru MyUserPrincipal implementira UserDetails.
+
+@Service
+public class MyUserDetailsService implements UserDetailsService {
+
+    private final UserRepository userRepository;
+    private final PasswordEncoder passwordEncoder;
+
+    @Autowired
+    public MyUserDetailsService(UserRepository userRepository, PasswordEncoder passwordEncoder) {
+        this.userRepository = userRepository;
+        this.passwordEncoder = passwordEncoder;
+    }
+
+    @Override
+    public UserDetails loadUserByUsername(String username) throws UsernameNotFoundException {
+        User user = userRepository.findByUsername(username).orElseThrow(
+                () -> new UsernameNotFoundException("User not found with username: " + username));
+
+        return new MyUserPrincipal(user);
+    }
+
+    public User saveUser(User user) {
+        user.setPassword(passwordEncoder.encode(user.getPassword()));
+        return userRepository.save(user);
+    }
+}
+
+
+public class MyUserPrincipal implements UserDetails {
+
+    private User user;
+
+    public MyUserPrincipal(User user) {
+        this.user = user;
+    }
+
+    @Override
+    public Collection<? extends GrantedAuthority> getAuthorities() {
+        Set<GrantedAuthority> authorities = new HashSet<>();
+
+        user.getRoles()
+            .stream()
+            .forEach( r -> {
+                    authorities.add(new SimpleGrantedAuthority("ROLE_" + r.getName()));
+
+                    r.getAuthorities().stream()
+                        .forEach(authority -> {
+                            authorities.add(new SimpleGrantedAuthority(authority.getName()));
+                        });
+            });
+
+        return authorities;
+    }
+
+    @Override
+    public String getPassword() {
+        return user.getPassword();
+    }
+
+    @Override
+    public String getUsername() {
+        return user.getUsername();
+    }
+
+    @Override
+    public boolean isEnabled() {
+        return user.isEnabled();
+    }
+
+    @Override
+    public boolean isAccountNonExpired() {
+        return true;
+    }
+
+    @Override
+    public boolean isAccountNonLocked() {
+        return true;
+    }
+
+    @Override
+    public boolean isCredentialsNonExpired() {
+        return true;
+    }
+
+}
+
+Da bismo upotpunili ovaj primer kreiraćemo prikazaćemo klase vezane za korisnika.
+
+@Entity
+@Table(name = "users")
+public class User {
+    @Id
+    @GeneratedValue(generator = "user_sequ", strategy = GenerationType.SEQUENCE)
+    @SequenceGenerator(name = "user_sequ", sequenceName = "user_sequ", initialValue = 1, allocationSize = 1)
+    private int id;
+
+    @Column(name = "username")
+    private String username;
+    private String password;
+    private boolean enabled;
+
+    @ManyToMany(fetch = FetchType.EAGER)
+    @JoinTable(name = "user_role",
+            joinColumns = @JoinColumn(name = "user_id"),
+            inverseJoinColumns = @JoinColumn(name = "role_id"))
+    @JsonManagedReference
+    private Set<Role> roles;
+
+    public User() {
+    }
+
+    public User(int id, String username, String password, boolean enabled, Set<Role> roles) {
+        this.id = id;
+        this.username = username;
+        this.password = password;
+        this.enabled = enabled;
+        this.roles = roles;
+    }
+
+    public int getId() {
+        return id;
+    }
+
+    public void setId(int id) {
+        this.id = id;
+    }
+
+    public String getUsername() {
+        return username;
+    }
+
+    public void setUsername(String username) {
+        this.username = username;
+    }
+
+    public String getPassword() {
+        return password;
+    }
+
+    public void setPassword(String password) {
+        this.password = password;
+    }
+
+    public boolean isEnabled() {
+        return enabled;
+    }
+
+    public void setEnabled(boolean enabled) {
+        this.enabled = enabled;
+    }
+
+    public Set<Role> getRoles() {
+        return roles;
+    }
+
+    public void setRoles(Set<Role> roles) {
+        this.roles = roles;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+
+        User user = (User) o;
+
+        return id == user.id;
+    }
+
+    @Override
+    public int hashCode() {
+        return id;
+    }
+
+    @Override
+    public String toString() {
+        return "User{" +
+                "id=" + id +
+                ", username='" + username + '\'' +
+                ", password='" + password + '\'' +
+                ", enabled=" + enabled +
+                ", roles=" + roles +
+                '}';
+    }
+}
+
+
+@Entity
+@Table(name = "roles")
+public class Role {
+    @Id
+    @GeneratedValue(generator = "role_sequ", strategy = GenerationType.SEQUENCE)
+    @SequenceGenerator(name = "role_sequ", sequenceName = "role_sequ", initialValue = 1, allocationSize = 1)
+    private int id;
+    private String name;
+
+    @ManyToMany(mappedBy = "roles")
+    @JsonBackReference
+    private Set<User> users;
+
+    @ManyToMany(fetch = FetchType.EAGER)
+    @JoinTable(name = "role_authority",
+            joinColumns = @JoinColumn(name = "role_id"),
+            inverseJoinColumns = @JoinColumn(name = "authority_id"))
+    @JsonManagedReference
+    private Set<Authority> authorities;
+
+    public Role() {
+    }
+
+    public Role(int id, String name, Set<User> users, Set<Authority> authorities) {
+        this.id = id;
+        this.name = name;
+        this.users = users;
+        this.authorities = authorities;
+    }
+
+    public int getId() {
+        return id;
+    }
+
+    public void setId(int id) {
+        this.id = id;
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    public void setName(String name) {
+        this.name = name;
+    }
+
+    public Set<User> getUsers() {
+        return users;
+    }
+
+    public void setUsers(Set<User> users) {
+        this.users = users;
+    }
+
+    public Set<Authority> getAuthorities() {
+        return authorities;
+    }
+
+    public void setAuthorities(Set<Authority> authorities) {
+        this.authorities = authorities;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+
+        Role role = (Role) o;
+
+        return id == role.id;
+    }
+
+    @Override
+    public int hashCode() {
+        return id;
+    }
+
+    @Override
+    public String toString() {
+        return "Role{" +
+                "id=" + id +
+                ", name='" + name + '\'' +
+                ", users=" + users +
+                ", authorities=" + authorities +
+                '}';
+    }
+}
+
+@Entity
+@Table(name = "authorities")
+public class Authority {
+
+    @Id
+    @GeneratedValue(generator = "authority_sequ", strategy = GenerationType.SEQUENCE)
+    @SequenceGenerator(name = "authority_sequ", sequenceName = "authority_sequ", initialValue = 1, allocationSize = 1)
+    private int id;
+    private String name;
+
+    @ManyToMany(mappedBy = "authorities")
+    @JsonBackReference
+    private Set<Role> roles;
+
+    public Authority() {
+    }
+
+    public Authority(int id, String name, Set<Role> roles) {
+        this.id = id;
+        this.name = name;
+        this.roles = roles;
+    }
+
+    public int getId() {
+        return id;
+    }
+
+    public void setId(int id) {
+        this.id = id;
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    public void setName(String name) {
+        this.name = name;
+    }
+
+    public Set<Role> getRoles() {
+        return roles;
+    }
+
+    public void setRoles(Set<Role> roles) {
+        this.roles = roles;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+
+        Authority authority = (Authority) o;
+
+        return id == authority.id;
+    }
+
+    @Override
+    public int hashCode() {
+        return id;
+    }
+
+    @Override
+    public String toString() {
+        return "Authority{" +
+                "id=" + id +
+                ", name='" + name + '\'' +
+                ", roles=" + roles +
+                '}';
+    }
+}
+
+Registrovaćemo i UserRepository interfjes koji nasleđuje JpaRepository.
+
+@Repository
+public interface UserRepository extends JpaRepository<User, Integer> {
+    Optional<User> findByUsername(String username);
+}
+
+@Repository
+public interface RolesRepository extends JpaRepository<Role, Integer> {
+    Optional<Role> findByName(String name);
+}
+
+@Repository
+public interface AuthorityRepository extends JpaRepository<Authority, Integer> {
+}
+
+Nakon ovih izmena arhitektura sistema izgleda ovako:
+
+(slika User Details Service)
+
+
+(Potrebno je dodati odgovarajuće zavisnosti u pom.xml fajlu, kao i podešavanja za konekciju na bazu i hibernate dijalekt u application.properties fajlu)
+
+
+
+3. LDAP Autentification
+
+LDAP je akronim od The Lightweight Directory Access Protocol, u radu je korišćen Apache Directory Studio kao LDAP server (postoje i druge implementacije).
+Koristi se za čuvanje podataka o korisnicima, grupama korisnika, organizacionim jedinicama kojima pripadaju korisnici i grupe, itd.
+
+Podaci se čuvaju u formatu stabla u sistemu. Mogu se pretraživati putem http ili https zahteva, zadavanjem određenih parametara u zahtevu (nije obrađeno ovde).
+
+Java i LDAP komuniciraju pomoću Java Naming and Directory Interface (JNDI) interfejsa. Taj interfejs je korišćen u Spring-u da se iznad njega napravi uprošćen api sa već gotovom implementacijom.
+
+
+Struktura DIT (Directory Information Tree) izgleda ovako:
+
+(slika ldap tree)
+
+
+korisnik u LDAP-u ima sledeće atribute:
+
+(ldap - admin user)
+
+
+grupa u LDAP-u ima sledeće atribute:
+
+(ldap - admin group )
+
+
+Na najvišem nivou u primeru se nalazi DC(Domain Component) dc=fon, ispod nje dc=master, a u njoj ostale komponente, u primeru su to OU(Organizational Unit) organizacione jedinice: ou=groups i ou=users.
+U okviru organizacione jedinice users se nalaze korisnici sitema.
+Korisnici mogu imati različite atribute, ovde su navedeni neki od njih: CN (Common Name), SN (Surname/Last Name), UID (User ID), usserPassword (korisnička šifra).
+
+Korisnik je kreiran kao InetOrgPerson, što je dodalo ostale atribute.
+Primer kreiranja korisnika:
+
+(slike ldap - kreiranje korisnika)
+
+
+kao RDN (Relative Distinguished Name) možemo odabrati CN atribut ili UID (prethodni korisnici su kreiani da RDN bude CN), u ovom primeru je za RDN odabran UID.
+
+
+Na ovaj način je kreiran novi korisnik u okviru organizacione jedinice users.
+
+U okviru organizacione jedinice groups se nalaze korisničke grupe.
+Da se kreiran nova grupa u okviru OU groups, potrebno je dodati novi Entry, prilikom odabira klase objekata odabrati GroupOfUniqueNames, prilikom odabira RDN odabrati CN a kao ime staviti ime role koju želimo da grupa ima, a nakon toga dodati uid korisnika. Na primer ako želimo da dodamo novog korisnika u grupu koju pravimo potrebno je da ispratimo sledeću sintaksu: uid=noviKorinik,ou=users,dc=master,dc=fon.
+
+Dodatno u okviru grupa dodati atribut businessCategory, u kojoj će biti smeštene privilegije korisnika: READ, WRITE, DELETE, UPDATE.
+
+
+
+Kao što se može primetiti prilikom pretrage i pronalažanja određenog čvora u stablu koristi se sintaksa takva da se kreće od samog čvora i ide se ka vrhu do glavne komponente u kojoj se on nalazi.
+
+
+Ldap struktura izgleda ovako:
+
+(slika LDAP struktura)
+
+
+U Spring Security dokumentaciji, naglašeno je da se UserDetailService ne može koristi da se pomoću njega generišu korisnici i User Principal iz LDAP-a, već se koristi DefaultLdapAuthoritiesPopulator. U radu je prikazana reimplementacija određenih metoda DefaultLdapAuthoritiesPopulator kako bi se izvukle role i privilegije za korisnika.
+
+public class CustomLdapAuthoritiesPopulator extends DefaultLdapAuthoritiesPopulator {
+    private static final Log logger = LogFactory.getLog(CustomLdapAuthoritiesPopulator.class);
+
+    private SpringSecurityLdapTemplate ldapTemplate;
+    private String groupRoleAttribute = "cn";
+    private String groupSearchBase;
+    private String groupSearchFilter = "(member={0})";
+    private String rolePrefix = "";// "ROLE_";
+    private boolean convertToUpperCase = true;
+    private Function<Map<String, List<String>>, GrantedAuthority> authorityMapper;
+
+    private final SearchControls searchControls = new SearchControls();
+
+    public CustomLdapAuthoritiesPopulator(ContextSource contextSource, String groupSearchBase) {
+        super(contextSource, groupSearchBase);
+        Assert.notNull(contextSource, "contextSource must not be null");
+        this.ldapTemplate = new SpringSecurityLdapTemplate(contextSource);
+        this.getLdapTemplate().setSearchControls(this.getSearchControls());
+        this.groupSearchBase = groupSearchBase;
+        this.setRolePrefix("");
+        if (groupSearchBase == null) {
+            logger.info("groupSearchBase is null. No group search will be performed.");
+        } else if (groupSearchBase.length() == 0) {
+            logger.info("groupSearchBase is empty. Searches will be performed from the context source base");
+        }
+
+        this.authorityMapper = (record) -> {
+            String role = (String)((List)record.get(this.groupRoleAttribute)).get(0);
+            if (this.convertToUpperCase) {
+                role = role.toUpperCase();
+            }
+
+            return new SimpleGrantedAuthority(this.rolePrefix + role);
+        };
+    }
+
+    private SearchControls getSearchControls() {
+        return this.searchControls;
+    }
+
+    protected Set<GrantedAuthority> getAdditionalRoles(DirContextOperations user, String username) {
+        Set<GrantedAuthority> additionalRoles = new HashSet<>();
+
+        String userDn = "uid="+username+",ou=users,dc=master,dc=fon";
+        String filter = "(member={0})";
+
+        String[] attributes = { "cn", "businessCategory" };
+       
+        try {
+            searchControls.setSearchScope(SearchControls.SUBTREE_SCOPE);
+            searchControls.setReturningAttributes(attributes);
+
+            NamingEnumeration<SearchResult> result = getContextSource().getReadOnlyContext().search(
+                    "ou=groups",
+                    "(&(objectClass=groupOfUniqueNames)(uniqueMember=UID="+username+",OU=users,DC=master,DC=fon))",
+                    searchControls);
+
+            while(result.hasMore()) {
+                SearchResult searchResult = (SearchResult) result.next();
+                Attributes attrs = searchResult.getAttributes();
+                String groupsCN = attrs.get("cn").toString().split(":")[1].trim();
+
+               additionalRoles.add(new SimpleGrantedAuthority("ROLE_" + groupsCN));
+
+                if(attrs.get("businessCategory") != null ) {
+                    String authorities[] = attrs.get("businessCategory").toString().split(":")[1].split(", ");
+
+                    Arrays.stream(authorities).forEach(a -> logger.info("LDAP authorities: "+a));
+
+                    Arrays.stream(authorities).forEach(a -> additionalRoles.add(new SimpleGrantedAuthority(a.trim())));
+                }
+            }
+        } catch (NamingException e) {
+            e.printStackTrace();
+        }
+
+        additionalRoles.stream()
+                .forEach(x -> logger.info(x.toString())
+            );
+        return additionalRoles;
+    }
+
+
+}
+
+
+
+Potrebno je dodati u WebConfig klasi još jedan način za auntetifikovanje:
+
+ 	@Override
+    protected void configure(AuthenticationManagerBuilder auth) throws Exception {
+        configureInMemoryAuth(auth);
+        configureUserDetailsService(auth);
+        configureLDAP(auth);
+    }
+
+
+    private void configureLDAP(AuthenticationManagerBuilder auth) throws Exception {
+        CustomLdapAuthoritiesPopulator ldapAuthoritiesPopulator = new CustomLdapAuthoritiesPopulator(contextSource, "ou=groups");
+
+        ldapAuthoritiesPopulator.setDefaultRole("ROLE_LDAP");
+
+        auth.ldapAuthentication()
+                .userDnPatterns("uid={0},ou=users")
+                .groupSearchBase("ou=groups")
+                .userSearchBase("ou=users")
+                .userSearchFilter("(uid={0})")
+                .groupSearchFilter("member={0}")
+                .groupRoleAttribute("cn")
+                .ldapAuthoritiesPopulator(ldapAuthoritiesPopulator)
+                .contextSource()
+                .url("ldap://localhost:10390/dc=master,dc=fon");
+    }
+
+
+Nakon ove izmene arhitektura aplikacije izgleda ovako:
+
+(slika ldap arhitektura)
+
+
+
+Ovim je završen deo vezan za autentifikaciju korisnika.
+
+
+
+Autorizacija sistema
+
+Autentifikacijom smo obezbedili da se u sistemu mogu prijaviti samo određeni korisnici.
+Nakon što smo omogućili prijavu na sistem i korisnicima dodelili role i privilegije, obezbedićemo putanje kontrolera i pozive servisa tako da mogu da ih pozovu samo oni korisnici koji imaju određena prava pristupa. Ovime ćemo razgraničiti u ovkiru sistema šta koji korisnik može da radi.
+
+Prvo ćemo obezbediti da putanji /hello/admin/* (* označava sve što se nalazi iza putanje) mogu pristupiti samo korisnici koji imaju rolu ADMIN. Metoda hasAnyRole omogućava da se proveri da li korisnik ima neku od rola i ako poseduje bar jednu od njih moći će da pristupi putanji.
+
+
+	@Override
+    protected void configure(HttpSecurity http) throws Exception {
+        http.csrf().disable();
+
+        http.addFilterAfter(new AfterLoginFilter(), AuthorizationFilter.class);
+
+        http.authorizeRequests()
+                .antMatchers("/hello/admin/*").hasRole("ADMIN")
+                .antMatchers("/hello/user/*").hasAnyRole("ADMIN", "STUFF", "USER")
+                .antMatchers("/simpledata/*").hasAnyRole("ADMIN", "STUFF", "USER")
+                .antMatchers("/login").permitAll();
+
+        http.authorizeRequests()
+                .anyRequest().fullyAuthenticated()
+                .and()
+                .formLogin()
+                .and().httpBasic();
+    }
+
+
+    
+-------------------------------------------------------------
+
+U zavisnosti od toga kako se korisnik identifikuje u sistemu on ce iskoristiti neki od filtera
+Based on the type of requests there are different Authentication Filters like the BasicAuthenticationFilter,UsernamePasswordAuthenticationFilter etc
+
+
+-----------------------------------------------------------
+-----------------------------------------------------------
+-----------------------------------------------------------
+
+
+
+DEO 2 
+
+U narednom delu implementacije aplikativne sigurnosti (Application Security) biće objašnjen koncept sesije, kada, kako i zašto se koristi. 
+Nakon toga biće objašnjeno šta je JWT (Json Web Token), kada, kako i zašto se koristi.
+
+Model u relacionoj bazi podataka biće proširen. Dodaćemo mogućnost za unos korisnika, kao i proveru da nakon 5 neuspešnih pokušaja prijavljivanja na sistem korisniku se zaključava nalog,
+nakon toga on mora da preko email-a resetuje šifru da bi otključao nalog i mogao opet da pristupi sistemu.
+
+Za komunikaciju između servisa koristi će JWT token koji će imati kratak vremenski period važenja u kome će se refresh-ovati (obnavljati), a nakon toga će korisnik biti dužan da se ponovo prijavi na sistem.
+
+Cilj proširenja je da se dodatno obezbedi sigurnost komunikacije između klijenta i servera. 
+
+Zašt o web security mora da ima ove stvari? Koja je razlika između web i deskotp aplikacije u poledu konekcije
+
+SESIJA 
+	- sta je
+	- cemu sluzi i zasto se koristi
+	- kada se koristi
+	- kako moze da se odrzava
+
+JWT 
+	- cemu sluzi i zasto se koristi
+	- kada se koristi
+	- kako moze da se odrzava
