@@ -1,5 +1,6 @@
 package fon.master.service;
 
+import fon.master.config.securityAnnotations.IsUser;
 import fon.master.exception.DataNotFoundException;
 import fon.master.exception.SimpleDataNotFoundException;
 import fon.master.model.SimpleData;
@@ -61,6 +62,7 @@ public class SimpleDataService {
         return simpleData.get();
     }
 
+    @IsUser
     public int getMaxId() {
         return simpleDataRepository.getMaxId().orElseThrow(
                 () -> new DataNotFoundException("No data present!")
